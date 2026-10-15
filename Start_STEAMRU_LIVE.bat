@@ -1,0 +1,32 @@
+@echo off
+setlocal EnableExtensions
+set "PYTHONIOENCODING=utf-8"
+set "PYTHONUTF8=1"
+chcp 65001 >nul
+cd /d "%~dp0"
+if not exist ".venv\Scripts\python.exe" goto missing_setup
+if not exist "start_steamru_live.py" goto missing_script
+".venv\Scripts\python.exe" check_install.py
+if errorlevel 1 goto failed
+if /i "%~1"=="--check-launcher" goto launcher_check
+".venv\Scripts\python.exe" start_steamru_live.py
+set "STEAMRU_START_EXIT=%ERRORLEVEL%"
+echo.
+echo Запуск завершён. Код выхода: %STEAMRU_START_EXIT%
+pause
+exit /b %STEAMRU_START_EXIT%
+:launcher_check
+echo Launcher OK. LIVE startup was not executed.
+exit /b 0
+:missing_setup
+echo Сначала запусти Setup.bat из этой папки.
+pause
+exit /b 1
+:missing_script
+echo Не найден start_steamru_live.py рядом с main.py.
+pause
+exit /b 1
+:failed
+echo Проверка зависимостей не прошла. Запусти Setup.bat.
+pause
+exit /b 1

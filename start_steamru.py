@@ -1,0 +1,88 @@
+"""Запуск Cardinal с локальным вводом STEAM.RU. Только dry_run, без покупок."""
+from datetime import datetime, timezone
+import getpass
+import json
+import os
+from pathlib import Path
+import runpy
+import sys
+from steamru_instance import InstanceLock, AlreadyRunning
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "plugins"))
+from steamru_stars_engine import SteamClient, ApiFailure, D
+
+
+def main():
+    try:
+        with InstanceLock(ROOT):
+            return run_safe()
+    except AlreadyRunning as exc:
+        print(str(exc))
+        return 2
+
+
+def run_safe():
+    os.chdir(ROOT)
+    os.environ.pop("STEAMRU_LIVE_CONFIRM", None)
+    config_path = ROOT / "storage/plugins/steamru_stars_config.json"
+    if not (ROOT / "configs/_main.cfg").exists() or not config_path.exists():
+        print("Сначала настрой Cardinal через Start.bat и установи плагин Stars.")
+        return 2
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if config.get("mode") != "dry_run" or config.get("capture_paid_orders_in_dry_run") is not False:
+        print("Этот файл запуска поддерживает только dry_run без захвата настоящих заказов.")
+        print("Для подготовленного боевого режима используй Start_STEAMRU_LIVE.bat.")
+        return 2
+    authorized_path = ROOT / "storage/cache/tg_authorized_users.json"
+    authorized = json.loads(authorized_path.read_text(encoding="utf-8")) if authorized_path.exists() else {}
+    if not authorized:
+        print("Сначала войди в своего Telegram-бота паролем и открой /menu через обычный Start.bat.")
+        return 2
+    owner = os.environ.get("STEAMRU_OWNER_TG_ID", "")
+    if not owner and len(authorized) == 1:
+        owner = next(iter(authorized))
+    if not owner:
+        owner = input("Введи свой числовой Telegram ID из списка авторизованных пользователей: ").strip()
+    if not owner.isdigit() or owner not in authorized:
+        print("Telegram ID должен принадлежать авторизованному пользователю Cardinal.")
+        return 2
+    print("Режим: DRY RUN. Покупки выключены, реальные заказы не захватываются.")
+    print("Ключи вводятся скрыто и не записываются в файлы. Используй одну пару STEAM.RU.")
+    key = os.environ.get("STEAMRU_API_KEY") or getpass.getpass("STEAM.RU api_key: ").strip()
+    secret = os.environ.get("STEAMRU_API_SECRET") or getpass.getpass("STEAM.RU api_secret: ").strip()
+    try:
+        client = SteamClient(key, secret)  # Изменяющие запросы запрещены по умолчанию.
+        account = client.account()
+        product = client.product("telegram-stars", 55, 50)
+        snapshot = {
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+            "product_id": 55, "service": "telegram-stars", "balance_usd": str(D(account["balance"])),
+            "price_usd": str(D(product["price_usd"])),
+            "min_count": product.get("min_count"), "max_count": product.get("max_count"),
+            "read_only": True,
+        }
+        (ROOT / "storage/plugins/steamru_catalog_snapshot.json").write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"STEAM.RU проверен: баланс ${snapshot['balance_usd']}; 50 Stars стоят ${D(product['price_usd']) * 50}.")
+    except ApiFailure as exc:
+        print(f"Проверка STEAM.RU не прошла: {exc.code}; HTTP {exc.status}. Покупок не было.")
+        return 1
+    except Exception as exc:
+        print(f"Проверка STEAM.RU не прошла: {type(exc).__name__}. Ключи не выводятся. Покупок не было.")
+        return 1
+    os.environ["STEAMRU_API_KEY"] = key
+    os.environ["STEAMRU_API_SECRET"] = secret
+    os.environ["STEAMRU_OWNER_TG_ID"] = owner
+    print("Запускаю Cardinal с доступом к безопасным командам STEAM.RU в твоём Telegram-боте.")
+    print("Это окно нужно оставить открытым. Для проверки отправь боту /sr_status.")
+    try:
+        runpy.run_path(str(ROOT / "main.py"), run_name="__main__")
+    finally:
+        for variable in ("STEAMRU_API_KEY", "STEAMRU_API_SECRET", "STEAMRU_OWNER_TG_ID"):
+            os.environ.pop(variable, None)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,105 @@
+"""Explicit local LIVE entry point. Startup checks only read the supplier API."""
+import configparser
+from datetime import datetime, timezone
+import getpass
+import json
+import os
+from pathlib import Path
+import runpy
+import sys
+from steamru_instance import InstanceLock, AlreadyRunning
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / 'plugins'))
+from steamru_stars_engine import SteamClient, D, effective_exchange_rate
+
+VARIABLES = ('STEAMRU_API_KEY', 'STEAMRU_API_SECRET', 'STEAMRU_OWNER_TG_ID', 'STEAMRU_LIVE_CONFIRM')
+
+
+def run_live():
+    os.chdir(ROOT)
+    os.environ.pop('STEAMRU_LIVE_CONFIRM', None)
+    config_path = ROOT / 'storage/plugins/steamru_stars_config.json'
+    if not config_path.exists() or not (ROOT / 'configs/_main.cfg').exists():
+        print('Cardinal и плагин ещё не настроены.')
+        return 2
+    cfg = json.loads(config_path.read_text(encoding='utf-8'))
+    if (cfg.get('mode') != 'live' or cfg.get('auto_disable_lots_on_pause') is not True
+            or cfg.get('activate_lots_on_resume') is not True or not cfg.get('managed_lots')
+            or not cfg.get('lot_ids_to_disable') or cfg.get('capture_initial_paid_orders') is not False
+            or cfg.get('capture_paid_orders_in_dry_run') is not False):
+        print('Нет настроенной безопасной конфигурации LIVE. Продажи не запущены.')
+        return 2
+    main_cfg = configparser.ConfigParser(delimiters=(':',), interpolation=None)
+    main_cfg.read(ROOT / 'configs/_main.cfg', encoding='utf-8')
+    if (main_cfg.getboolean('FunPay', 'autoRestore', fallback=True)
+            or main_cfg.getboolean('FunPay', 'autoDelivery', fallback=True)):
+        print('Выключи штатную автовыдачу и автовосстановление Cardinal.')
+        return 2
+    authorized_path = ROOT / 'storage/cache/tg_authorized_users.json'
+    authorized = json.loads(authorized_path.read_text(encoding='utf-8')) if authorized_path.exists() else {}
+    owner = os.environ.get('STEAMRU_OWNER_TG_ID', '')
+    if not owner and len(authorized) == 1:
+        owner = next(iter(authorized))
+    if not owner and authorized:
+        owner = input('Введи свой числовой Telegram ID из авторизованных пользователей: ').strip()
+    if not owner.isdigit() or owner not in authorized:
+        print('Сначала авторизуйся в своём управляющем Telegram-боте.')
+        return 2
+    print('LIVE: после /sr_resume бот откроет лоты и будет покупать Stars по оплаченным заказам.')
+    print('Ключ и секрет вводятся скрыто, только локально. В файлы не сохраняются.')
+    key = os.environ.get('STEAMRU_API_KEY') or getpass.getpass('STEAM.RU api_key: ').strip()
+    secret = os.environ.get('STEAMRU_API_SECRET') or getpass.getpass('STEAM.RU api_secret: ').strip()
+    try:
+        rate = effective_exchange_rate(cfg['wallet_paid_rub'], cfg['wallet_credited_usd'])
+        if rate != D(cfg['rub_per_usd']):
+            raise ValueError('Не совпадает эффективный курс')
+        api = SteamClient(key, secret)  # Startup never permits supplier POST.
+        balance = D(api.account()['balance'])
+        largest = D('0')
+        prices = {}
+        for name in set(cfg['managed_lots'].values()):
+            rule = cfg['lot_rules'][name]
+            count = rule['stars_per_unit']
+            product = api.product('telegram-stars', 55, count)
+            cost = D(product['price_usd']) * count
+            largest = max(largest, cost)
+            prices[str(count)] = str(cost)
+        if balance < largest + D(cfg['min_balance_reserve_usd']):
+            raise ValueError('Недостаточно баланса на максимальный пакет')
+        snapshot = {'verified_at': datetime.now(timezone.utc).isoformat(),
+                    'balance_usd': str(balance), 'packages_usd': prices, 'read_only': True}
+        (ROOT / 'storage/plugins/steamru_live_check.json').write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        print('STEAM.RU проверен только чтением. Баланс $' + str(balance) + '. Покупок при запуске нет.')
+    except Exception as exc:
+        print('Проверка LIVE не прошла: ' + type(exc).__name__ + '. Продажи не запущены.')
+        return 1
+    os.environ.update(STEAMRU_API_KEY=key, STEAMRU_API_SECRET=secret,
+                      STEAMRU_OWNER_TG_ID=owner, STEAMRU_LIVE_CONFIRM='I_ACCEPT_REAL_PURCHASES')
+    print('Оставь окно открытым. В Telegram отправь /sr_resume, затем /sr_status.')
+    try:
+        runpy.run_path(str(ROOT / 'main.py'), run_name='__main__')
+    finally:
+        loaded = sys.modules.get('plugins.steamru_stars')
+        if loaded is not None and getattr(loaded, 'C', None) is not None:
+            loaded.on_pre_stop(loaded.C)
+        for name in VARIABLES:
+            os.environ.pop(name, None)
+    return 0
+
+
+def main():
+    try:
+        with InstanceLock(ROOT):
+            return run_live()
+    except AlreadyRunning as exc:
+        print(str(exc))
+        return 2
+    finally:
+        for name in VARIABLES:
+            os.environ.pop(name, None)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
